@@ -49,12 +49,20 @@ def _raise_for_error(resp):
         raise RuntimeError("LiteLLM ответил %s: %s" % (resp.status_code, resp.text[:2000]))
 
 
-def chat(model, prompt, system="", max_tokens=1024, temperature=1.0, project=""):
+def chat(model, prompt, system="", max_tokens=1024, temperature=1.0, project="",
+         image_png=None):
+    """image_png — опциональные байты картинки: включает vision-режим (промт+изображение)."""
     base_url, key = load_config()
     messages = []
     if system:
         messages.append({"role": "system", "content": system})
-    messages.append({"role": "user", "content": prompt})
+    if image_png is not None:
+        data_uri = "data:image/png;base64," + base64.b64encode(image_png).decode()
+        content = [{"type": "text", "text": prompt},
+                   {"type": "image_url", "image_url": {"url": data_uri}}]
+        messages.append({"role": "user", "content": content})
+    else:
+        messages.append({"role": "user", "content": prompt})
     resp = requests.post(
         base_url + "/v1/chat/completions",
         json={"model": model, "messages": messages,
@@ -64,21 +72,46 @@ def chat(model, prompt, system="", max_tokens=1024, temperature=1.0, project="")
     return resp.json()["choices"][0]["message"]["content"]
 
 
-def image(model, prompt, size="", project=""):
-    """Возвращает байты картинки (png/jpeg)."""
-    base_url, key = load_config()
-    payload = {"model": model, "prompt": prompt, "n": 1}
-    if size:
-        payload["size"] = size
-    resp = requests.post(base_url + "/v1/images/generations", json=payload,
-                         headers=_headers(key, project), timeout=300)
-    _raise_for_error(resp)
+def _image_config(aspect_ratio="", resolution=""):
+    cfg = {}
+    if aspect_ratio and aspect_ratio != "auto":
+        cfg["aspect_ratio"] = aspect_ratio
+    if resolution and resolution != "auto":
+        cfg["image_size"] = resolution
+    return cfg
+
+
+def _extract_image(resp):
     item = resp.json()["data"][0]
     if item.get("b64_json"):
         return base64.b64decode(item["b64_json"])
     dl = requests.get(item["url"], timeout=300)
     _raise_for_error(dl)
     return dl.content
+
+
+def image(model, prompt, aspect_ratio="", resolution="", input_images=None, project=""):
+    """Возвращает байты картинки. input_images — список png-байтов референсов:
+    с ними идём в /v1/images/edits (image-to-image), без них — в /generations."""
+    base_url, key = load_config()
+    cfg = _image_config(aspect_ratio, resolution)
+    if input_images:
+        fields = {"model": model, "prompt": prompt, "n": "1"}
+        if cfg:
+            import json as _json
+            fields["image_config"] = _json.dumps(cfg)
+        files = [("image", ("ref_%d.png" % i, png, "image/png"))
+                 for i, png in enumerate(input_images)]
+        resp = requests.post(base_url + "/v1/images/edits", data=fields, files=files,
+                             headers=_headers(key, project), timeout=600)
+    else:
+        payload = {"model": model, "prompt": prompt, "n": 1}
+        if cfg:
+            payload["image_config"] = cfg
+        resp = requests.post(base_url + "/v1/images/generations", json=payload,
+                             headers=_headers(key, project), timeout=300)
+    _raise_for_error(resp)
+    return _extract_image(resp)
 
 
 def video(model, prompt, seconds="8", size="", input_reference_png=None, project="",

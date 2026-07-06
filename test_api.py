@@ -90,8 +90,37 @@ def test_image_b64():
     png = b"\x89PNGfake"
     resp = Resp(200, {"data": [{"b64_json": base64.b64encode(png).decode()}]})
     with mock.patch.dict(os.environ, ENV), \
-         mock.patch.object(api.requests, "post", return_value=resp):
+         mock.patch.object(api.requests, "post", return_value=resp) as post:
         assert api.image("m", "cat") == png
+        assert post.call_args.args[0].endswith("/v1/images/generations")
+        assert "image_config" not in post.call_args.kwargs["json"]  # auto -> не шлём
+
+
+def test_image_config_and_edits():
+    png = b"\x89PNGfake"
+    resp = Resp(200, {"data": [{"b64_json": base64.b64encode(png).decode()}]})
+    # aspect_ratio/resolution уходят в image_config
+    with mock.patch.dict(os.environ, ENV), \
+         mock.patch.object(api.requests, "post", return_value=resp) as post:
+        api.image("m", "cat", aspect_ratio="16:9", resolution="2K")
+        cfg = post.call_args.kwargs["json"]["image_config"]
+        assert cfg == {"aspect_ratio": "16:9", "image_size": "2K"}
+    # с референсами — multipart на /v1/images/edits
+    with mock.patch.dict(os.environ, ENV), \
+         mock.patch.object(api.requests, "post", return_value=resp) as post:
+        api.image("m", "cat", input_images=[b"ref1", b"ref2"])
+        assert post.call_args.args[0].endswith("/v1/images/edits")
+        assert len(post.call_args.kwargs["files"]) == 2
+
+
+def test_chat_vision_content():
+    resp = Resp(200, {"choices": [{"message": {"content": "вижу"}}]})
+    with mock.patch.dict(os.environ, ENV), \
+         mock.patch.object(api.requests, "post", return_value=resp) as post:
+        assert api.chat("m", "что на фото?", image_png=b"\x89PNGfake") == "вижу"
+        content = post.call_args.kwargs["json"]["messages"][-1]["content"]
+        assert content[0] == {"type": "text", "text": "что на фото?"}
+        assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
 
 
 def test_video_poll_then_download():
