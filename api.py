@@ -53,7 +53,10 @@ def list_models(mode):
             _MODELS_CACHE["at"] = time.monotonic()
         except Exception:
             pass  # шлюз недоступен — работаем с тем, что есть в кэше
-    return sorted(g["model_group"] for g in _MODELS_CACHE["groups"] if g.get("mode") == mode)
+    # кураторские алиасы админа — без слэша; развёртка wildcard приходит как
+    # openrouter/<vendor>/<model> и в дропдауны не попадает
+    return sorted(g["model_group"] for g in _MODELS_CACHE["groups"]
+                  if g.get("mode") == mode and "/" not in g["model_group"])
 
 
 def _headers(api_key, project=""):
@@ -71,8 +74,9 @@ def _raise_for_error(resp):
 
 
 def chat(model, prompt, system="", max_tokens=1024, temperature=1.0, project="",
-         image_png=None):
-    """image_png — опциональные байты картинки: включает vision-режим (промт+изображение)."""
+         image_png=None, reasoning_effort="off"):
+    """image_png — опциональные байты картинки: включает vision-режим (промт+изображение).
+    reasoning_effort — глубина размышлений reasoning-моделей; "off" = не отправлять параметр."""
     base_url, key = load_config()
     messages = []
     if system:
@@ -84,11 +88,14 @@ def chat(model, prompt, system="", max_tokens=1024, temperature=1.0, project="",
         messages.append({"role": "user", "content": content})
     else:
         messages.append({"role": "user", "content": prompt})
-    resp = requests.post(
-        base_url + "/v1/chat/completions",
-        json={"model": model, "messages": messages,
-              "max_tokens": max_tokens, "temperature": temperature},
-        headers=_headers(key, project), timeout=300)
+    payload = {"model": model, "messages": messages,
+               "max_tokens": max_tokens, "temperature": temperature}
+    if reasoning_effort and reasoning_effort != "off":
+        payload["reasoning_effort"] = reasoning_effort
+        # маппер openrouter в LiteLLM параметра не знает — просим проброс как есть
+        payload["allowed_openai_params"] = ["reasoning_effort"]
+    resp = requests.post(base_url + "/v1/chat/completions", json=payload,
+                         headers=_headers(key, project), timeout=300)
     _raise_for_error(resp)
     return resp.json()["choices"][0]["message"]["content"]
 

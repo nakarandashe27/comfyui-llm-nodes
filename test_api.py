@@ -86,6 +86,18 @@ def test_chat_headers_and_result():
         assert "x-litellm-tags" not in post.call_args.kwargs["headers"]
 
 
+def test_chat_reasoning_effort():
+    resp = Resp(200, {"choices": [{"message": {"content": "ok"}}]})
+    with mock.patch.dict(os.environ, ENV), \
+         mock.patch.object(api.requests, "post", return_value=resp) as post:
+        api.chat("m", "hi", reasoning_effort="high")
+        assert post.call_args.kwargs["json"]["reasoning_effort"] == "high"
+        assert post.call_args.kwargs["json"]["allowed_openai_params"] == ["reasoning_effort"]
+        api.chat("m", "hi", reasoning_effort="off")
+        assert "reasoning_effort" not in post.call_args.kwargs["json"]
+        assert "allowed_openai_params" not in post.call_args.kwargs["json"]
+
+
 def test_image_b64():
     png = b"\x89PNGfake"
     resp = Resp(200, {"data": [{"b64_json": base64.b64encode(png).decode()}]})
@@ -117,12 +129,16 @@ def test_list_models():
     groups = {"data": [{"model_group": "nano-banana-pro", "mode": "image_generation"},
                        {"model_group": "nano-banana", "mode": "image_generation"},
                        {"model_group": "veo-3", "mode": "video_generation"},
+                       {"model_group": "claude-sonnet-5", "mode": "chat"},
+                       # развёртка wildcard (со слэшем) в дропдауны не попадает
+                       {"model_group": "openrouter/openai/gpt-4o", "mode": "chat"},
                        {"model_group": "openrouter/*", "mode": None}]}
     with mock.patch.dict(os.environ, ENV), \
          mock.patch.dict(api._MODELS_CACHE, {"at": 0.0, "groups": []}), \
          mock.patch.object(api.requests, "get", return_value=Resp(200, groups)):
         assert api.list_models("image_generation") == ["nano-banana", "nano-banana-pro"]
         assert api.list_models("video_generation") == ["veo-3"]
+        assert api.list_models("chat") == ["claude-sonnet-5"]
     # нет конфига -> пустой список, не исключение (нода подставит фолбэк)
     with mock.patch.dict(os.environ, {}, clear=True), \
          mock.patch.object(api, "_CONFIG_PATH", "no_such_file.ini"):

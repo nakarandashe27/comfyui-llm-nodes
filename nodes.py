@@ -34,23 +34,31 @@ class LLMText:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "model": ("STRING", {"default": "openrouter/google/gemini-2.5-flash"}),
+                "model": _model_combo("chat", ["gemini-2.5-flash", "claude-sonnet-5",
+                                               "claude-sonnet-4.6", "gemini-2.5-flash-lite",
+                                               "gpt-5.5"]),
                 "prompt": ("STRING", {"multiline": True, "default": ""}),
             },
             "optional": {
                 "system": ("STRING", {"multiline": True, "default": ""}),
                 "image": ("IMAGE", {"tooltip": "Опционально: включает vision — модель видит картинку (описание, анализ, промт по референсу)."}),
+                "reasoning_effort": (["off", "minimal", "low", "medium", "high", "xhigh"],
+                                     {"default": "off", "tooltip": "Глубина размышлений reasoning-моделей. off — параметр не отправляется."}),
                 "max_tokens": ("INT", {"default": 1024, "min": 1, "max": 200000}),
                 "temperature": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 2**31 - 1,
+                                 "tooltip": "В API не уходит: смени (или randomize), чтобы перегенерировать с теми же входами."}),
                 "project": _PROJECT_INPUT,
             },
         }
 
-    def run(self, model, prompt, system="", image=None, max_tokens=1024,
-            temperature=1.0, project=""):
+    def run(self, model, prompt, system="", image=None, reasoning_effort="off",
+            max_tokens=1024, temperature=1.0, seed=0, project=""):
+        # seed — только обход кэша ComfyUI (повторный запуск), в запрос не идёт
         png = _tensor_to_png(image) if image is not None else None
         return (api.chat(model, prompt, system=system, max_tokens=max_tokens,
-                         temperature=temperature, project=project, image_png=png),)
+                         temperature=temperature, project=project, image_png=png,
+                         reasoning_effort=reasoning_effort),)
 
 
 class LLMImage:
@@ -70,12 +78,15 @@ class LLMImage:
                 "resolution": (["auto", "1K", "2K", "4K"], {"default": "auto"}),
                 "image_1": ("IMAGE", {"tooltip": "Опционально: референс/исходник — включает режим редактирования (image-to-image)."}),
                 "image_2": ("IMAGE", {"tooltip": "Опционально: второй референс (совмещение, перенос стиля)."}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 2**31 - 1,
+                                 "tooltip": "В API не уходит: смени (или randomize), чтобы перегенерировать с теми же входами."}),
                 "project": _PROJECT_INPUT,
             },
         }
 
     def run(self, model, prompt, aspect_ratio="auto", resolution="auto",
-            image_1=None, image_2=None, project=""):
+            image_1=None, image_2=None, seed=0, project=""):
+        # seed — только обход кэша ComfyUI, в запрос не идёт
         refs = [_tensor_to_png(t) for t in (image_1, image_2) if t is not None]
         raw = api.image(model, prompt, aspect_ratio=aspect_ratio, resolution=resolution,
                         input_images=refs or None, project=project)
