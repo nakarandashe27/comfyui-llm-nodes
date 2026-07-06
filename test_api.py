@@ -125,6 +125,19 @@ def test_image_config_and_edits():
         assert len(post.call_args.kwargs["files"]) == 2
 
 
+def test_image_quality():
+    png = b"\x89PNGfake"
+    resp = Resp(200, {"data": [{"b64_json": base64.b64encode(png).decode()}]})
+    with mock.patch.dict(os.environ, ENV), \
+         mock.patch.object(api.requests, "post", return_value=resp) as post:
+        api.image("m", "cat", quality="low")
+        assert post.call_args.kwargs["json"]["quality"] == "low"
+        api.image("m", "cat", quality="auto")  # auto -> не шлём
+        assert "quality" not in post.call_args.kwargs["json"]
+        api.image("m", "cat", quality="high", input_images=[b"ref"])  # edits: в form-поля
+        assert post.call_args.kwargs["data"]["quality"] == "high"
+
+
 def test_list_models():
     groups = {"data": [{"model_group": "nano-banana-pro", "mode": "image_generation"},
                        {"model_group": "nano-banana", "mode": "image_generation"},

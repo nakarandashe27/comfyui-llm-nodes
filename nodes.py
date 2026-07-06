@@ -6,6 +6,7 @@ import time
 import numpy as np
 import torch
 from PIL import Image
+from comfy_api.latest import io as comfy_io
 
 from . import api
 
@@ -25,74 +26,119 @@ def _tensor_to_png(image_tensor, index=0):
     return buf.getvalue()
 
 
-class LLMText:
-    CATEGORY = "LLM"
-    RETURN_TYPES = ("STRING",)
-    FUNCTION = "run"
+def _text_model_options():
+    """Опции DynamicCombo: у каждой модели — свой набор значений reasoning_effort.
+    claude/gemini понимают low/medium/high, у gpt есть ещё minimal/xhigh;
+    незнакомые модели получают полный список. off — параметр не отправляется."""
+    models = sorted(set(api.list_models("chat")) | {"gemini-2.5-flash", "claude-sonnet-5",
+                                                    "claude-sonnet-4.6", "gemini-2.5-flash-lite",
+                                                    "gpt-5.5"})
+    options = []
+    for m in models:
+        # ponytail: семейство по префиксу имени; метаданные шлюза (supports_reasoning)
+        # ненадёжны — LiteLLM не знает новых openrouter-моделей
+        if m.startswith("claude") or m.startswith("gemini"):
+            efforts = ["off", "low", "medium", "high"]
+        else:
+            efforts = ["off", "minimal", "low", "medium", "high", "xhigh"]
+        options.append(comfy_io.DynamicCombo.Option(m, [
+            comfy_io.Combo.Input("reasoning_effort", options=efforts, default="off",
+                                 tooltip="Глубина размышлений reasoning-моделей. off — параметр не отправляется."),
+        ]))
+    return options
+
+
+class LLMText(comfy_io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return comfy_io.Schema(
+            node_id="LLMText",
+            display_name="LLM Text",
+            category="LLM",
+            inputs=[
+                comfy_io.DynamicCombo.Input("model", options=_text_model_options()),
+                comfy_io.String.Input("prompt", multiline=True, default=""),
+                comfy_io.String.Input("system", multiline=True, default="", optional=True),
+                comfy_io.Image.Input("image", optional=True,
+                                     tooltip="Опционально: включает vision — модель видит картинку (описание, анализ, промт по референсу)."),
+                comfy_io.Int.Input("max_tokens", default=1024, min=1, max=200000, optional=True),
+                comfy_io.Float.Input("temperature", default=1.0, min=0.0, max=2.0, step=0.05, optional=True),
+                comfy_io.Int.Input("seed", default=0, min=0, max=2**31 - 1, optional=True,
+                                   control_after_generate=True,
+                                   tooltip="В API не уходит: смени (или randomize), чтобы перегенерировать с теми же входами."),
+                comfy_io.String.Input("project", default="", optional=True,
+                                      tooltip="Имя проекта для учёта расходов (тег в дашборде). Можно оставить пустым."),
+            ],
+            outputs=[comfy_io.String.Output()],
+        )
 
     @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "model": _model_combo("chat", ["gemini-2.5-flash", "claude-sonnet-5",
-                                               "claude-sonnet-4.6", "gemini-2.5-flash-lite",
-                                               "gpt-5.5"]),
-                "prompt": ("STRING", {"multiline": True, "default": ""}),
-            },
-            "optional": {
-                "system": ("STRING", {"multiline": True, "default": ""}),
-                "image": ("IMAGE", {"tooltip": "Опционально: включает vision — модель видит картинку (описание, анализ, промт по референсу)."}),
-                "reasoning_effort": (["off", "minimal", "low", "medium", "high", "xhigh"],
-                                     {"default": "off", "tooltip": "Глубина размышлений reasoning-моделей. off — параметр не отправляется."}),
-                "max_tokens": ("INT", {"default": 1024, "min": 1, "max": 200000}),
-                "temperature": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05}),
-                "seed": ("INT", {"default": 0, "min": 0, "max": 2**31 - 1,
-                                 "tooltip": "В API не уходит: смени (или randomize), чтобы перегенерировать с теми же входами."}),
-                "project": _PROJECT_INPUT,
-            },
-        }
-
-    def run(self, model, prompt, system="", image=None, reasoning_effort="off",
-            max_tokens=1024, temperature=1.0, seed=0, project=""):
+    def execute(cls, model, prompt, system="", image=None,
+                max_tokens=1024, temperature=1.0, seed=0, project="") -> comfy_io.NodeOutput:
+        # model — словарь DynamicCombo: сама модель + её reasoning_effort
         # seed — только обход кэша ComfyUI (повторный запуск), в запрос не идёт
         png = _tensor_to_png(image) if image is not None else None
-        return (api.chat(model, prompt, system=system, max_tokens=max_tokens,
-                         temperature=temperature, project=project, image_png=png,
-                         reasoning_effort=reasoning_effort),)
+        return comfy_io.NodeOutput(
+            api.chat(model["model"], prompt, system=system, max_tokens=max_tokens,
+                     temperature=temperature, project=project, image_png=png,
+                     reasoning_effort=model.get("reasoning_effort", "off")))
 
 
-class LLMImage:
-    CATEGORY = "LLM"
-    RETURN_TYPES = ("IMAGE",)
-    FUNCTION = "run"
+def _image_model_options():
+    """Опции DynamicCombo: у каждой модели — свой набор параметров.
+    gpt-image-семейство — quality low/medium/high; остальные (gemini/nano-banana
+    и незнакомые) — aspect_ratio + resolution. Новая модель со шлюза без правки
+    нод получит дефолтный набор."""
+    models = sorted(set(api.list_models("image_generation")) | {"nano-banana", "nano-banana-pro"})
+    options = []
+    for m in models:
+        if "gpt" in m:  # ponytail: семейство по подстроке имени; таблица маппинга — когда эвристика соврёт
+            params = [comfy_io.Combo.Input("quality", options=["auto", "low", "medium", "high"],
+                                           default="auto", tooltip="Качество генерации gpt-image. auto — не отправлять параметр.")]
+        else:
+            params = [comfy_io.Combo.Input("aspect_ratio", options=["auto", "1:1", "16:9", "9:16", "4:3", "3:4", "21:9"],
+                                           default="auto"),
+                      comfy_io.Combo.Input("resolution", options=["auto", "1K", "2K", "4K"], default="auto")]
+        options.append(comfy_io.DynamicCombo.Option(m, params))
+    return options
+
+
+class LLMImage(comfy_io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return comfy_io.Schema(
+            node_id="LLMImage",
+            display_name="LLM Image",
+            category="LLM",
+            inputs=[
+                comfy_io.DynamicCombo.Input("model", options=_image_model_options()),
+                comfy_io.String.Input("prompt", multiline=True, default=""),
+                comfy_io.Image.Input("image_1", optional=True,
+                                     tooltip="Опционально: референс/исходник — включает режим редактирования (image-to-image)."),
+                comfy_io.Image.Input("image_2", optional=True,
+                                     tooltip="Опционально: второй референс (совмещение, перенос стиля)."),
+                comfy_io.Int.Input("seed", default=0, min=0, max=2**31 - 1, optional=True,
+                                   control_after_generate=True,
+                                   tooltip="В API не уходит: смени (или randomize), чтобы перегенерировать с теми же входами."),
+                comfy_io.String.Input("project", default="", optional=True,
+                                      tooltip="Имя проекта для учёта расходов (тег в дашборде). Можно оставить пустым."),
+            ],
+            outputs=[comfy_io.Image.Output()],
+        )
 
     @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "model": _model_combo("image_generation", ["nano-banana", "nano-banana-pro"]),
-                "prompt": ("STRING", {"multiline": True, "default": ""}),
-            },
-            "optional": {
-                "aspect_ratio": (["auto", "1:1", "16:9", "9:16", "4:3", "3:4", "21:9"], {"default": "auto"}),
-                "resolution": (["auto", "1K", "2K", "4K"], {"default": "auto"}),
-                "image_1": ("IMAGE", {"tooltip": "Опционально: референс/исходник — включает режим редактирования (image-to-image)."}),
-                "image_2": ("IMAGE", {"tooltip": "Опционально: второй референс (совмещение, перенос стиля)."}),
-                "seed": ("INT", {"default": 0, "min": 0, "max": 2**31 - 1,
-                                 "tooltip": "В API не уходит: смени (или randomize), чтобы перегенерировать с теми же входами."}),
-                "project": _PROJECT_INPUT,
-            },
-        }
-
-    def run(self, model, prompt, aspect_ratio="auto", resolution="auto",
-            image_1=None, image_2=None, seed=0, project=""):
+    def execute(cls, model, prompt, image_1=None, image_2=None, seed=0, project="") -> comfy_io.NodeOutput:
+        # model — словарь DynamicCombo: сама модель + параметры её набора
         # seed — только обход кэша ComfyUI, в запрос не идёт
         refs = [_tensor_to_png(t) for t in (image_1, image_2) if t is not None]
-        raw = api.image(model, prompt, aspect_ratio=aspect_ratio, resolution=resolution,
+        raw = api.image(model["model"], prompt,
+                        aspect_ratio=model.get("aspect_ratio", ""),
+                        resolution=model.get("resolution", ""),
+                        quality=model.get("quality", ""),
                         input_images=refs or None, project=project)
         img = Image.open(io.BytesIO(raw)).convert("RGB")
         tensor = torch.from_numpy(np.array(img).astype(np.float32) / 255.0)[None,]
-        return (tensor,)
+        return comfy_io.NodeOutput(tensor)
 
 
 class LLMVideo:

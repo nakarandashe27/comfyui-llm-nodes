@@ -118,13 +118,16 @@ def _extract_image(resp):
     return dl.content
 
 
-def image(model, prompt, aspect_ratio="", resolution="", input_images=None, project=""):
+def image(model, prompt, aspect_ratio="", resolution="", quality="", input_images=None, project=""):
     """Возвращает байты картинки. input_images — список png-байтов референсов:
-    с ними идём в /v1/images/edits (image-to-image), без них — в /generations."""
+    с ними идём в /v1/images/edits (image-to-image), без них — в /generations.
+    quality — low/medium/high для gpt-image-моделей; "auto"/"" = не отправлять."""
     base_url, key = load_config()
     cfg = _image_config(aspect_ratio, resolution)
     if input_images:
         fields = {"model": model, "prompt": prompt, "n": "1"}
+        if quality and quality != "auto":
+            fields["quality"] = quality
         if cfg:
             import json as _json
             fields["image_config"] = _json.dumps(cfg)
@@ -134,6 +137,8 @@ def image(model, prompt, aspect_ratio="", resolution="", input_images=None, proj
                              headers=_headers(key, project), timeout=600)
     else:
         payload = {"model": model, "prompt": prompt, "n": 1}
+        if quality and quality != "auto":
+            payload["quality"] = quality
         if cfg:
             payload["image_config"] = cfg
         resp = requests.post(base_url + "/v1/images/generations", json=payload,
