@@ -1,0 +1,5 @@
+; Скопируй в config.ini рядом с этим файлом и заполни.
+; config.ini в .gitignore — ключ никогда не попадает ни в git, ни в воркфлоу.
+[litellm]
+base_url = https://litellm.company.com
+api_key = sk-виртуальный-ключ-выданный-админом
