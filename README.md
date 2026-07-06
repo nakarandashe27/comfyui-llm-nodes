@@ -4,7 +4,7 @@
 
 ## Установка (сотрудник)
 
-1. ComfyUI Manager → Install via Git URL → URL этого репозитория (или `git clone` в `custom_nodes/`).
+1. ComfyUI Manager → Install via Git URL → `https://github.com/nakarandashe27/comfyui-llm-nodes` (или `git clone` в `custom_nodes/`).
 2. Рядом с пакетом скопировать `config.ini.example` → `config.ini`, вписать адрес шлюза и свой ключ (выдаёт админ).
 3. Перезапустить ComfyUI — в категории **LLM** появятся ноды `LLM Text`, `LLM Image`, `LLM Video`.
 
