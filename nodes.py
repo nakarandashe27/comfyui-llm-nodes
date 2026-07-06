@@ -12,6 +12,12 @@ from . import api
 _PROJECT_INPUT = ("STRING", {"default": "", "tooltip": "Имя проекта для учёта расходов (тег в дашборде). Можно оставить пустым."})
 
 
+def _model_combo(mode, fallback):
+    """Дропдаун моделей со шлюза; фолбэк-константы всегда в списке, чтобы
+    сохранённые воркфлоу валидировались и при недоступном шлюзе."""
+    return (sorted(set(api.list_models(mode)) | set(fallback)), {"default": fallback[0]})
+
+
 def _tensor_to_png(image_tensor, index=0):
     arr = (image_tensor[index].cpu().numpy() * 255.0).clip(0, 255).astype("uint8")
     buf = io.BytesIO()
@@ -56,7 +62,7 @@ class LLMImage:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "model": ("STRING", {"default": "nano-banana"}),
+                "model": _model_combo("image_generation", ["nano-banana", "nano-banana-pro"]),
                 "prompt": ("STRING", {"multiline": True, "default": ""}),
             },
             "optional": {
@@ -89,7 +95,7 @@ class LLMVideo:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "model": ("STRING", {"default": "veo-3"}),
+                "model": _model_combo("video_generation", ["veo-3"]),
                 "prompt": ("STRING", {"multiline": True, "default": ""}),
             },
             "optional": {

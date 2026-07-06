@@ -35,6 +35,27 @@ def load_config():
     return base_url.rstrip("/"), api_key
 
 
+_MODELS_CACHE = {"at": 0.0, "groups": []}
+
+
+def list_models(mode):
+    """Модели со шлюза (/model_group/info) с данным mode (image_generation, video_generation).
+    Пустой список при недоступном шлюзе/конфиге — вызывающий подставит фолбэк."""
+    try:
+        base_url, key = load_config()
+    except ConfigError:
+        return []
+    if time.monotonic() - _MODELS_CACHE["at"] > 300:
+        try:
+            r = requests.get(base_url + "/model_group/info", headers=_headers(key), timeout=5)
+            _raise_for_error(r)
+            _MODELS_CACHE["groups"] = r.json().get("data", [])
+            _MODELS_CACHE["at"] = time.monotonic()
+        except Exception:
+            pass  # шлюз недоступен — работаем с тем, что есть в кэше
+    return sorted(g["model_group"] for g in _MODELS_CACHE["groups"] if g.get("mode") == mode)
+
+
 def _headers(api_key, project=""):
     h = {"Authorization": "Bearer " + api_key}
     if project:

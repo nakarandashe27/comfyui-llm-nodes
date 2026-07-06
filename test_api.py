@@ -113,6 +113,22 @@ def test_image_config_and_edits():
         assert len(post.call_args.kwargs["files"]) == 2
 
 
+def test_list_models():
+    groups = {"data": [{"model_group": "nano-banana-pro", "mode": "image_generation"},
+                       {"model_group": "nano-banana", "mode": "image_generation"},
+                       {"model_group": "veo-3", "mode": "video_generation"},
+                       {"model_group": "openrouter/*", "mode": None}]}
+    with mock.patch.dict(os.environ, ENV), \
+         mock.patch.dict(api._MODELS_CACHE, {"at": 0.0, "groups": []}), \
+         mock.patch.object(api.requests, "get", return_value=Resp(200, groups)):
+        assert api.list_models("image_generation") == ["nano-banana", "nano-banana-pro"]
+        assert api.list_models("video_generation") == ["veo-3"]
+    # нет конфига -> пустой список, не исключение (нода подставит фолбэк)
+    with mock.patch.dict(os.environ, {}, clear=True), \
+         mock.patch.object(api, "_CONFIG_PATH", "no_such_file.ini"):
+        assert api.list_models("image_generation") == []
+
+
 def test_chat_vision_content():
     resp = Resp(200, {"choices": [{"message": {"content": "вижу"}}]})
     with mock.patch.dict(os.environ, ENV), \
