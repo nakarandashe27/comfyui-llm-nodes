@@ -27,7 +27,7 @@ def load_config():
     api_key = os.environ.get("LITELLM_API_KEY", "")
     if not (base_url and api_key) and os.path.exists(_CONFIG_PATH):
         cfg = configparser.ConfigParser()
-        cfg.read(_CONFIG_PATH, encoding="utf-8")
+        cfg.read(_CONFIG_PATH, encoding="utf-8-sig")  # -sig: Notepad/PowerShell пишут BOM
         base_url = base_url or cfg.get("litellm", "base_url", fallback="")
         api_key = api_key or cfg.get("litellm", "api_key", fallback="")
     if not base_url or not api_key:

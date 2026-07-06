@@ -44,6 +44,20 @@ def test_config():
             assert "config.ini" in str(e)
 
 
+def test_config_bom():
+    # Notepad/PowerShell на Windows пишут UTF-8 с BOM — конфиг обязан читаться
+    import tempfile
+    fd, path = tempfile.mkstemp(suffix=".ini")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(b"\xef\xbb\xbf" + b"[litellm]\nbase_url = http://gw\napi_key = sk-bom\n")
+        with mock.patch.dict(os.environ, {}, clear=True), \
+             mock.patch.object(api, "_CONFIG_PATH", path):
+            assert api.load_config() == ("http://gw", "sk-bom")
+    finally:
+        os.unlink(path)
+
+
 def test_error_text_passthrough():
     with mock.patch.dict(os.environ, ENV), \
          mock.patch.object(api.requests, "post",
