@@ -46,15 +46,16 @@ def list_models(mode):
     except ConfigError:
         return []
     if time.monotonic() - _MODELS_CACHE["at"] > 300:
+        # метку двигаем и при неудаче: иначе лежащий шлюз = 5с таймаут на каждый /object_info
+        _MODELS_CACHE["at"] = time.monotonic()
         try:
             r = requests.get(base_url + "/model_group/info", headers=_headers(key), timeout=5)
             _raise_for_error(r)
             _MODELS_CACHE["groups"] = r.json().get("data", [])
-            _MODELS_CACHE["at"] = time.monotonic()
         except Exception:
-            pass  # шлюз недоступен — работаем с тем, что есть в кэше
-    # кураторские алиасы админа — без слэша; развёртка wildcard приходит как
-    # openrouter/<vendor>/<model> и в дропдауны не попадает
+            pass  # шлюз недоступен — стейл-кэш/фолбэки, ретрай через 5 мин
+    # кураторские алиасы админа — без слэша (INDEX.md, решение №8: wildcard убран);
+    # фильтр по "/" остаётся защитой на случай возврата полных имён на шлюз
     return sorted(g["model_group"] for g in _MODELS_CACHE["groups"]
                   if g.get("mode") == mode and "/" not in g["model_group"])
 
@@ -110,7 +111,12 @@ def _image_config(aspect_ratio="", resolution=""):
 
 
 def _extract_image(resp):
-    item = resp.json()["data"][0]
+    data = resp.json().get("data") or []
+    if not data or not (data[0].get("b64_json") or data[0].get("url")):
+        # отказ/фильтр контента: без guard'а сотрудник видел бы голый IndexError
+        raise RuntimeError("Модель не вернула изображение (отказ или фильтр контента). "
+                           "Ответ: %s" % resp.text[:500])
+    item = data[0]
     if item.get("b64_json"):
         return base64.b64decode(item["b64_json"])
     dl = requests.get(item["url"], timeout=300)
@@ -173,9 +179,14 @@ def video(model, prompt, seconds="8", size="", input_reference_png=None, project
         try:
             r = requests.get(base_url + "/v1/videos/" + vid, headers=_headers(key), timeout=60)
         except requests.RequestException:
-            net_errors += 1  # ретрай только сетевых ошибок поллинга, не генерации (nodes-spec §3)
+            net_errors += 1  # ретрай только поллинга, не самой генерации (nodes-spec §3)
             if net_errors > 3:
                 raise
+            continue
+        if r.status_code >= 500:  # моргнувший шлюз (рестарт litellm) — тоже ретрай, видео уже оплачено
+            net_errors += 1
+            if net_errors > 3:
+                _raise_for_error(r)
             continue
         net_errors = 0
         _raise_for_error(r)

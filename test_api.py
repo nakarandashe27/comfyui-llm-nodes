@@ -195,6 +195,56 @@ def test_video_failed_raises():
             assert "failed" in str(e) and "nsfw" in str(e)
 
 
+def test_image_no_data():
+    # отказ/фильтр контента: понятная ошибка вместо IndexError
+    for bad in ({"data": []}, {}, {"data": [{"revised_prompt": "x"}]}):
+        with mock.patch.dict(os.environ, ENV), \
+             mock.patch.object(api.requests, "post", return_value=Resp(200, bad, text="{}")):
+            try:
+                api.image("m", "cat")
+                assert False
+            except RuntimeError as e:
+                assert "не вернула изображение" in str(e)
+
+
+def test_list_models_failure_backoff():
+    # лежащий шлюз: один неудачный запрос на 5 минут, не на каждый вызов
+    boom = api.requests.RequestException("net down")
+    with mock.patch.dict(os.environ, ENV), \
+         mock.patch.dict(api._MODELS_CACHE, {"at": 0.0, "groups": []}), \
+         mock.patch.object(api.requests, "get", side_effect=boom) as get:
+        assert api.list_models("chat") == []
+        assert api.list_models("chat") == []
+        assert get.call_count == 1
+
+
+def test_video_5xx_poll_retry():
+    # моргнувший шлюз посреди поллинга — ретрай, а не потеря оплаченного видео
+    polls = [Resp(502, text="Bad Gateway"),
+             Resp(200, {"status": "processing"}),
+             Resp(200, {"status": "completed"}),
+             Resp(200, content=b"MP4DATA")]
+    with mock.patch.dict(os.environ, ENV), \
+         mock.patch.object(api.requests, "post", return_value=Resp(200, {"id": "v5"})), \
+         mock.patch.object(api.requests, "get", side_effect=polls), \
+         mock.patch.object(api.time, "sleep"):
+        assert api.video("m", "cat") == b"MP4DATA"
+
+
+def test_video_5xx_poll_limit():
+    with mock.patch.dict(os.environ, ENV), \
+         mock.patch.object(api.requests, "post", return_value=Resp(200, {"id": "v6"})), \
+         mock.patch.object(api.requests, "get",
+                           return_value=Resp(502, text="Bad Gateway")) as get, \
+         mock.patch.object(api.time, "sleep"):
+        try:
+            api.video("m", "cat")
+            assert False
+        except RuntimeError as e:
+            assert "502" in str(e)
+        assert get.call_count == 4  # 1 + 3 ретрая
+
+
 def test_video_net_retry_limit():
     boom = api.requests.RequestException("net down")
     with mock.patch.dict(os.environ, ENV), \
