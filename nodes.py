@@ -99,12 +99,14 @@ _AR_FULL = _AR_BASE + ["1:4", "4:1", "1:8", "8:1"]  # экстремальные
 _AR_MAI = ["auto", "1:1", "4:3", "3:4", "16:9", "9:16", "3:2", "2:3"]
 
 _IMG_FAMILIES = {
-    #        aspect     sizes                       think  max_img sys    seed_api
-    "nb":   (_AR_BASE, None,                        False, 3,      True,  True),
-    "pro":  (_AR_BASE, ["1K", "2K", "4K"],          False, 14,     True,  True),
-    "nb2":  (_AR_FULL, ["0.5K", "1K", "2K", "4K"],  True,  14,     True,  True),
-    "lite": (_AR_BASE, None,                        True,  14,     True,  True),
-    "mai":  (_AR_MAI,  None,                        False, 1,      False, False),
+    #        aspect     sizes           think  max_img sys    seed_api
+    "nb":   (_AR_BASE, None,            False, 3,      True,  True),
+    # стабильные слаги 20260528 потеряли 4K (и 0.5K у nb-2): Google оставил их
+    # только preview-слагам — проверено живьём 2026-07-12 (nodes-image-v2 §5.1.2 п.5)
+    "pro":  (_AR_BASE, ["1K", "2K"],    False, 14,     True,  True),
+    "nb2":  (_AR_FULL, ["1K", "2K"],    True,  14,     True,  True),
+    "lite": (_AR_BASE, None,            True,  14,     True,  True),
+    "mai":  (_AR_MAI,  None,            False, 1,      False, False),
 }
 
 
