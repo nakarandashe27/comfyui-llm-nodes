@@ -19,14 +19,23 @@ import api  # noqa: E402
 
 
 class Resp:
-    def __init__(self, status=200, json_data=None, content=b"", text=""):
+    def __init__(self, status=200, json_data=None, content=b"", text="", headers=None):
         self.status_code = status
         self._json = json_data or {}
         self.content = content
         self.text = text
+        self.headers = headers or {}
 
     def json(self):
         return self._json
+
+
+def img_msg(*datas, content=""):
+    """Ответ chat-пути с картинками в message.images (data-URL)."""
+    images = [{"type": "image_url", "index": i,
+               "image_url": {"url": "data:image/png;base64," + base64.b64encode(d).decode()}}
+              for i, d in enumerate(datas)]
+    return {"choices": [{"message": {"content": content, "images": images}}]}
 
 
 ENV = {"LITELLM_BASE_URL": "http://gw/", "LITELLM_API_KEY": "sk-test"}
@@ -70,11 +79,12 @@ def test_error_text_passthrough():
 
 
 def test_chat_headers_and_result():
-    resp = Resp(200, {"choices": [{"message": {"content": "ok!"}}]})
+    resp = Resp(200, {"choices": [{"message": {"content": "ok!"}}]},
+                headers={"x-litellm-response-cost": "0.0012"})
     with mock.patch.dict(os.environ, ENV), \
          mock.patch.object(api.requests, "post", return_value=resp) as post:
-        out = api.chat("m", "hi", system="sys", project="ACME")
-        assert out == "ok!"
+        out, cost = api.chat("m", "hi", system="sys", project="ACME")
+        assert out == "ok!" and cost == 0.0012
         kw = post.call_args.kwargs
         assert kw["headers"]["Authorization"] == "Bearer sk-test"
         assert kw["headers"]["x-litellm-tags"] == "project:ACME"
@@ -98,44 +108,62 @@ def test_chat_reasoning_effort():
         assert "allowed_openai_params" not in post.call_args.kwargs["json"]
 
 
-def test_image_b64():
-    png = b"\x89PNGfake"
-    resp = Resp(200, {"data": [{"b64_json": base64.b64encode(png).decode()}]})
+def test_image_chat_request_body():
+    resp = Resp(200, img_msg(b"\x89PNGfake"))
     with mock.patch.dict(os.environ, ENV), \
          mock.patch.object(api.requests, "post", return_value=resp) as post:
-        assert api.image("m", "cat") == png
-        assert post.call_args.args[0].endswith("/v1/images/generations")
-        assert "image_config" not in post.call_args.kwargs["json"]  # auto -> не шлём
+        api.image_chat("m", "cat", system="sys", aspect_ratio="16:9", image_size="2K",
+                       thinking="HIGH", with_text=True, input_images=[b"r1", b"r2"], seed=7)
+        body = post.call_args.kwargs["json"]
+        assert post.call_args.args[0].endswith("/v1/chat/completions")
+        assert body["modalities"] == ["image", "text"]
+        assert body["image_config"] == {"aspect_ratio": "16:9", "image_size": "2K"}
+        assert body["reasoning"] == {"effort": "high"}
+        assert body["seed"] == 7
+        assert set(body["allowed_openai_params"]) == {"modalities", "image_config", "reasoning", "seed"}
+        assert body["messages"][0] == {"role": "system", "content": "sys"}
+        content = body["messages"][1]["content"]
+        assert [p["type"] for p in content] == ["image_url", "image_url", "text"]
 
 
-def test_image_config_and_edits():
-    png = b"\x89PNGfake"
-    resp = Resp(200, {"data": [{"b64_json": base64.b64encode(png).decode()}]})
-    # aspect_ratio/resolution уходят в image_config
+def test_image_chat_minimal_body():
+    resp = Resp(200, img_msg(b"\x89PNGfake"))
     with mock.patch.dict(os.environ, ENV), \
          mock.patch.object(api.requests, "post", return_value=resp) as post:
-        api.image("m", "cat", aspect_ratio="16:9", resolution="2K")
-        cfg = post.call_args.kwargs["json"]["image_config"]
-        assert cfg == {"aspect_ratio": "16:9", "image_size": "2K"}
-    # с референсами — multipart на /v1/images/edits
-    with mock.patch.dict(os.environ, ENV), \
-         mock.patch.object(api.requests, "post", return_value=resp) as post:
-        api.image("m", "cat", input_images=[b"ref1", b"ref2"])
-        assert post.call_args.args[0].endswith("/v1/images/edits")
-        assert len(post.call_args.kwargs["files"]) == 2
+        api.image_chat("m", "cat")  # всё по умолчанию: только modalities
+        body = post.call_args.kwargs["json"]
+        assert body["modalities"] == ["image"]
+        for absent in ("image_config", "reasoning", "seed"):
+            assert absent not in body
+        assert body["allowed_openai_params"] == ["modalities"]
+        assert len(body["messages"]) == 1  # без system
 
 
-def test_image_quality():
-    png = b"\x89PNGfake"
-    resp = Resp(200, {"data": [{"b64_json": base64.b64encode(png).decode()}]})
+def test_image_chat_parse_final_thought_cost():
+    final, thought = b"FINALIMG", b"THOUGHTIMG"
+    resp = Resp(200, img_msg(thought, final, content="note"),
+                headers={"x-litellm-response-cost": "0.0387"})
     with mock.patch.dict(os.environ, ENV), \
-         mock.patch.object(api.requests, "post", return_value=resp) as post:
-        api.image("m", "cat", quality="low")
-        assert post.call_args.kwargs["json"]["quality"] == "low"
-        api.image("m", "cat", quality="auto")  # auto -> не шлём
-        assert "quality" not in post.call_args.kwargs["json"]
-        api.image("m", "cat", quality="high", input_images=[b"ref"])  # edits: в form-поля
-        assert post.call_args.kwargs["data"]["quality"] == "high"
+         mock.patch.object(api.requests, "post", return_value=resp):
+        f, text, th, cost = api.image_chat("m", "cat")
+        # финал = последняя картинка, thought = первая (OpenRouter не помечает)
+        assert f == final and th == thought and text == "note" and cost == 0.0387
+    # одна картинка -> thought нет
+    with mock.patch.dict(os.environ, ENV), \
+         mock.patch.object(api.requests, "post", return_value=Resp(200, img_msg(final))):
+        f, text, th, cost = api.image_chat("m", "cat")
+        assert f == final and th is None and cost is None
+
+
+def test_image_chat_no_image_raises():
+    resp = Resp(200, {"choices": [{"message": {"content": "не буду"}}]})
+    with mock.patch.dict(os.environ, ENV), \
+         mock.patch.object(api.requests, "post", return_value=resp):
+        try:
+            api.image_chat("m", "cat")
+            assert False
+        except RuntimeError as e:
+            assert "не вернула изображение" in str(e)
 
 
 def test_list_models():
@@ -162,7 +190,7 @@ def test_chat_vision_content():
     resp = Resp(200, {"choices": [{"message": {"content": "вижу"}}]})
     with mock.patch.dict(os.environ, ENV), \
          mock.patch.object(api.requests, "post", return_value=resp) as post:
-        assert api.chat("m", "что на фото?", image_png=b"\x89PNGfake") == "вижу"
+        assert api.chat("m", "что на фото?", image_png=b"\x89PNGfake")[0] == "вижу"
         content = post.call_args.kwargs["json"]["messages"][-1]["content"]
         assert content[0] == {"type": "text", "text": "что на фото?"}
         assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
@@ -177,7 +205,7 @@ def test_video_poll_then_download():
          mock.patch.object(api.requests, "post", return_value=submit), \
          mock.patch.object(api.requests, "get", side_effect=polls) as get, \
          mock.patch.object(api.time, "sleep"):
-        out = api.video("m", "cat", seconds=4)
+        out, cost = api.video("m", "cat", seconds=4)
         assert out == b"MP4DATA"
         assert get.call_args.args[0].endswith("/v1/videos/vid1/content")
 
@@ -193,18 +221,6 @@ def test_video_failed_raises():
             assert False
         except RuntimeError as e:
             assert "failed" in str(e) and "nsfw" in str(e)
-
-
-def test_image_no_data():
-    # отказ/фильтр контента: понятная ошибка вместо IndexError
-    for bad in ({"data": []}, {}, {"data": [{"revised_prompt": "x"}]}):
-        with mock.patch.dict(os.environ, ENV), \
-             mock.patch.object(api.requests, "post", return_value=Resp(200, bad, text="{}")):
-            try:
-                api.image("m", "cat")
-                assert False
-            except RuntimeError as e:
-                assert "не вернула изображение" in str(e)
 
 
 def test_list_models_failure_backoff():
@@ -228,7 +244,7 @@ def test_video_5xx_poll_retry():
          mock.patch.object(api.requests, "post", return_value=Resp(200, {"id": "v5"})), \
          mock.patch.object(api.requests, "get", side_effect=polls), \
          mock.patch.object(api.time, "sleep"):
-        assert api.video("m", "cat") == b"MP4DATA"
+        assert api.video("m", "cat")[0] == b"MP4DATA"
 
 
 def test_video_5xx_poll_limit():

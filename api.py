@@ -74,9 +74,19 @@ def _raise_for_error(resp):
         raise RuntimeError("LiteLLM ответил %s: %s" % (resp.status_code, resp.text[:2000]))
 
 
+def _cost(resp):
+    """Фактическая стоимость вызова из заголовка шлюза (nodes-image-v2 §5.2), None если нет."""
+    v = resp.headers.get("x-litellm-response-cost")
+    try:
+        return float(v) if v is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 def chat(model, prompt, system="", max_tokens=1024, temperature=1.0, project="",
          image_png=None, reasoning_effort="off"):
-    """image_png — опциональные байты картинки: включает vision-режим (промт+изображение).
+    """Возвращает (text, cost_usd | None).
+    image_png — опциональные байты картинки: включает vision-режим (промт+изображение).
     reasoning_effort — глубина размышлений reasoning-моделей; "off" = не отправлять параметр."""
     base_url, key = load_config()
     messages = []
@@ -98,64 +108,73 @@ def chat(model, prompt, system="", max_tokens=1024, temperature=1.0, project="",
     resp = requests.post(base_url + "/v1/chat/completions", json=payload,
                          headers=_headers(key, project), timeout=300)
     _raise_for_error(resp)
-    return resp.json()["choices"][0]["message"]["content"]
+    return resp.json()["choices"][0]["message"]["content"], _cost(resp)
 
 
-def _image_config(aspect_ratio="", resolution=""):
+def image_chat(model, prompt, system="", aspect_ratio="", image_size="", thinking="",
+               with_text=False, input_images=None, seed=None, project=""):
+    """Картинка через chat-путь шлюза — генерация и редактирование одним маршрутом
+    (nodes-image-v2 §5.1, проверено живьём для gemini-семейства и mai).
+    Возвращает (final_bytes, text, thought_bytes | None, cost_usd | None).
+
+    input_images — список байтов референсов (image_url-парты перед промтом).
+    thinking — "MINIMAL"/"HIGH" -> reasoning.effort (только nb-2/lite); "" = не слать.
+    seed=None — не отправлять (mai его не знает). OpenRouter не помечает
+    thought-парты, поэтому финал = последняя картинка ответа, thought = первая
+    при наличии нескольких."""
+    base_url, key = load_config()
+    content = [{"type": "image_url",
+                "image_url": {"url": "data:image/png;base64," + base64.b64encode(png).decode()}}
+               for png in (input_images or [])]
+    content.append({"type": "text", "text": prompt})
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": content})
+
+    payload = {"model": model, "messages": messages,
+               "modalities": ["image", "text"] if with_text else ["image"]}
+    allowed = ["modalities"]  # шлюз пропускает нестандартные параметры только по этому списку
     cfg = {}
     if aspect_ratio and aspect_ratio != "auto":
         cfg["aspect_ratio"] = aspect_ratio
-    if resolution and resolution != "auto":
-        cfg["image_size"] = resolution
-    return cfg
+    if image_size and image_size != "auto":
+        cfg["image_size"] = image_size
+    if cfg:
+        payload["image_config"] = cfg
+        allowed.append("image_config")
+    if thinking:
+        payload["reasoning"] = {"effort": thinking.lower()}
+        allowed.append("reasoning")
+    if seed is not None:
+        payload["seed"] = seed
+        allowed.append("seed")
+    payload["allowed_openai_params"] = allowed
 
-
-def _extract_image(resp):
-    data = resp.json().get("data") or []
-    if not data or not (data[0].get("b64_json") or data[0].get("url")):
-        # отказ/фильтр контента: без guard'а сотрудник видел бы голый IndexError
-        raise RuntimeError("Модель не вернула изображение (отказ или фильтр контента). "
-                           "Ответ: %s" % resp.text[:500])
-    item = data[0]
-    if item.get("b64_json"):
-        return base64.b64decode(item["b64_json"])
-    dl = requests.get(item["url"], timeout=300)
-    _raise_for_error(dl)
-    return dl.content
-
-
-def image(model, prompt, aspect_ratio="", resolution="", quality="", input_images=None, project=""):
-    """Возвращает байты картинки. input_images — список png-байтов референсов:
-    с ними идём в /v1/images/edits (image-to-image), без них — в /generations.
-    quality — low/medium/high для gpt-image-моделей; "auto"/"" = не отправлять."""
-    base_url, key = load_config()
-    cfg = _image_config(aspect_ratio, resolution)
-    if input_images:
-        fields = {"model": model, "prompt": prompt, "n": "1"}
-        if quality and quality != "auto":
-            fields["quality"] = quality
-        if cfg:
-            import json as _json
-            fields["image_config"] = _json.dumps(cfg)
-        files = [("image", ("ref_%d.png" % i, png, "image/png"))
-                 for i, png in enumerate(input_images)]
-        resp = requests.post(base_url + "/v1/images/edits", data=fields, files=files,
-                             headers=_headers(key, project), timeout=600)
-    else:
-        payload = {"model": model, "prompt": prompt, "n": 1}
-        if quality and quality != "auto":
-            payload["quality"] = quality
-        if cfg:
-            payload["image_config"] = cfg
-        resp = requests.post(base_url + "/v1/images/generations", json=payload,
-                             headers=_headers(key, project), timeout=300)
+    resp = requests.post(base_url + "/v1/chat/completions", json=payload,
+                         headers=_headers(key, project), timeout=600)
     _raise_for_error(resp)
-    return _extract_image(resp)
+    msg = resp.json()["choices"][0]["message"]
+    datas = []
+    for im in (msg.get("images") or []):
+        url = (im.get("image_url") or {}).get("url", "")
+        if url.startswith("data:"):
+            datas.append(base64.b64decode(url.split(",", 1)[1]))
+        elif url:
+            dl = requests.get(url, timeout=300)
+            _raise_for_error(dl)
+            datas.append(dl.content)
+    if not datas:
+        raise RuntimeError("Модель не вернула изображение (отказ или фильтр контента). "
+                           "Ответ: %s" % str(msg.get("content"))[:300])
+    thought = datas[0] if len(datas) > 1 else None
+    return datas[-1], msg.get("content") or "", thought, _cost(resp)
 
 
 def video(model, prompt, seconds="8", size="", input_reference_png=None, project="",
           poll_interval=10, timeout=15 * 60):
-    """Сабмит → поллинг до completed/failed → байты mp4 (nodes-spec §4)."""
+    """Сабмит → поллинг до completed/failed → (байты mp4, cost_usd | None) (nodes-spec §4).
+    Стоимость — из заголовка ответа на сабмит (расход списывается при постановке задачи)."""
     base_url, key = load_config()
     fields = {"model": model, "prompt": prompt, "seconds": str(seconds)}
     if size:
@@ -169,6 +188,7 @@ def video(model, prompt, seconds="8", size="", input_reference_png=None, project
                              headers=_headers(key, project), timeout=120)
     _raise_for_error(resp)
     vid = resp.json()["id"]
+    cost = _cost(resp)
 
     deadline = time.monotonic() + timeout
     net_errors = 0
@@ -199,4 +219,4 @@ def video(model, prompt, seconds="8", size="", input_reference_png=None, project
     content = requests.get(base_url + "/v1/videos/" + vid + "/content",
                            headers=_headers(key), timeout=600)
     _raise_for_error(content)
-    return content.content
+    return content.content, cost
