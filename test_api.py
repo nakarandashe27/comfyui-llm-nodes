@@ -83,17 +83,18 @@ def test_chat_headers_and_result():
                 headers={"x-litellm-response-cost": "0.0012"})
     with mock.patch.dict(os.environ, ENV), \
          mock.patch.object(api.requests, "post", return_value=resp) as post:
-        out, cost = api.chat("m", "hi", system="sys", project="ACME")
+        # кириллица в проекте: тег в теле, не заголовком (заголовки latin-1 — падало)
+        out, cost = api.chat("m", "hi", system="sys", project="Реклама")
         assert out == "ok!" and cost == 0.0012
         kw = post.call_args.kwargs
         assert kw["headers"]["Authorization"] == "Bearer sk-test"
-        assert kw["headers"]["x-litellm-tags"] == "project:ACME"
+        assert kw["json"]["metadata"] == {"tags": ["project:Реклама"]}
         assert kw["json"]["messages"][0] == {"role": "system", "content": "sys"}
     # без project — тега нет
     with mock.patch.dict(os.environ, ENV), \
          mock.patch.object(api.requests, "post", return_value=resp) as post:
         api.chat("m", "hi")
-        assert "x-litellm-tags" not in post.call_args.kwargs["headers"]
+        assert "metadata" not in post.call_args.kwargs["json"]
 
 
 def test_chat_reasoning_effort():
@@ -208,6 +209,21 @@ def test_video_poll_then_download():
         out, cost = api.video("m", "cat", seconds=4)
         assert out == b"MP4DATA"
         assert get.call_args.args[0].endswith("/v1/videos/vid1/content")
+
+
+def test_video_project_tag_both_paths():
+    # JSON-путь: metadata — dict; multipart-путь: metadata — JSON-строка (форма)
+    import json
+    done = [Resp(200, {"status": "completed"}), Resp(200, content=b"MP4")]
+    with mock.patch.dict(os.environ, ENV), \
+         mock.patch.object(api.requests, "post", return_value=Resp(200, {"id": "v7"})) as post, \
+         mock.patch.object(api.requests, "get", side_effect=done * 2), \
+         mock.patch.object(api.time, "sleep"):
+        api.video("m", "cat", project="Реклама")
+        assert post.call_args.kwargs["json"]["metadata"] == {"tags": ["project:Реклама"]}
+        api.video("m", "cat", project="Реклама", input_reference_png=b"\x89PNGfake")
+        form = post.call_args.kwargs["data"]
+        assert json.loads(form["metadata"]) == {"tags": ["project:Реклама"]}
 
 
 def test_video_failed_raises():

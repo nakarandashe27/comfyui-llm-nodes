@@ -5,6 +5,7 @@
 """
 import base64
 import configparser
+import json
 import os
 import time
 
@@ -60,12 +61,15 @@ def list_models(mode):
                   if g.get("mode") == mode and "/" not in g["model_group"])
 
 
-def _headers(api_key, project=""):
-    h = {"Authorization": "Bearer " + api_key}
-    if project:
-        # тег проекта — единственный источник проектного разреза в дашборде
-        h["x-litellm-tags"] = "project:" + project
-    return h
+def _headers(api_key):
+    return {"Authorization": "Bearer " + api_key}
+
+
+def _tag_meta(project):
+    """Тег проекта (единственный источник проектного разреза в дашборде) — в теле
+    запроса (metadata.tags), не заголовком x-litellm-tags: заголовки HTTP — latin-1,
+    кириллица в имени проекта роняла запрос (UnicodeEncodeError)."""
+    return {"tags": ["project:" + project]}
 
 
 def _raise_for_error(resp):
@@ -105,8 +109,10 @@ def chat(model, prompt, system="", max_tokens=1024, temperature=1.0, project="",
         payload["reasoning_effort"] = reasoning_effort
         # маппер openrouter в LiteLLM параметра не знает — просим проброс как есть
         payload["allowed_openai_params"] = ["reasoning_effort"]
+    if project:
+        payload["metadata"] = _tag_meta(project)
     resp = requests.post(base_url + "/v1/chat/completions", json=payload,
-                         headers=_headers(key, project), timeout=300)
+                         headers=_headers(key), timeout=300)
     _raise_for_error(resp)
     return resp.json()["choices"][0]["message"]["content"], _cost(resp)
 
@@ -150,9 +156,11 @@ def image_chat(model, prompt, system="", aspect_ratio="", image_size="", thinkin
         payload["seed"] = seed
         allowed.append("seed")
     payload["allowed_openai_params"] = allowed
+    if project:
+        payload["metadata"] = _tag_meta(project)
 
     resp = requests.post(base_url + "/v1/chat/completions", json=payload,
-                         headers=_headers(key, project), timeout=600)
+                         headers=_headers(key), timeout=600)
     _raise_for_error(resp)
     msg = resp.json()["choices"][0]["message"]
     datas = []
@@ -180,12 +188,17 @@ def video(model, prompt, seconds="8", size="", input_reference_png=None, project
     if size:
         fields["size"] = size
     if input_reference_png is not None:
+        if project:
+            # multipart: значения формы — строки; шлюз json.loads-ит поле metadata
+            fields["metadata"] = json.dumps(_tag_meta(project))
         resp = requests.post(base_url + "/v1/videos", data=fields,
                              files={"input_reference": ("reference.png", input_reference_png, "image/png")},
-                             headers=_headers(key, project), timeout=120)
+                             headers=_headers(key), timeout=120)
     else:
+        if project:
+            fields["metadata"] = _tag_meta(project)
         resp = requests.post(base_url + "/v1/videos", json=fields,
-                             headers=_headers(key, project), timeout=120)
+                             headers=_headers(key), timeout=120)
     _raise_for_error(resp)
     vid = resp.json()["id"]
     cost = _cost(resp)
